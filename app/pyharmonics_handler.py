@@ -117,7 +117,7 @@ def whats_options_interest(symbol):
     yo = YahooOptionData(symbol)
     yo.analyse_options()
     p = OptionPlotter(yo, yo.ticker.options[0])
-    return p. yo
+    return p, yo
 
 
 if __name__ == "__main__":

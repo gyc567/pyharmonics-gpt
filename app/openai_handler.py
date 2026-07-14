@@ -21,10 +21,18 @@ FUNCTION_ROUTER = {
     "options_volume": whats_options_volume
 }
 
-client = OpenAI(
-    api_key=os.getenv("OPENAI_API_KEY"),
-    base_url=openai_api_base_url
-)
+# Lazy client initialization to avoid import-time errors when key is missing
+_client = None
+
+def _get_client():
+    global _client
+    if _client is None:
+        _client = OpenAI(
+            api_key=os.getenv("OPENAI_API_KEY") or "dummy-key-for-testing",
+            base_url=openai_api_base_url
+        )
+    return _client
+
 
 def parse_args(string):
     """
@@ -65,7 +73,7 @@ def query_openai(prompt, developer_content, model=None):
     logging.debug(f"Developer content: {developer_content}")
     logging.debug(f"Model: {model}")
     try:
-        response = client.chat.completions.create(
+        response = _get_client().chat.completions.create(
             model=model or openai_api_model,
             messages=[
                 {"role": "developer", "content": developer_content},

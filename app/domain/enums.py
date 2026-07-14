@@ -1,0 +1,53 @@
+"""Domain enums for Pyharmonics SaaS API."""
+from enum import Enum
+
+
+class Market(str, Enum):
+    """Supported market data sources."""
+    BINANCE = "binance"
+    YAHOO = "yahoo"
+
+
+class Interval(str, Enum):
+    """Supported candle intervals."""
+    M15 = "15m"
+    H1 = "1h"
+    H4 = "4h"
+    D1 = "1d"
+    W1 = "1w"
+
+
+class AnalysisType(str, Enum):
+    """Supported analysis types."""
+    FORMING = "forming"
+    FORMED = "formed"
+    DIVERGENCE = "divergence"
+
+
+class Status(str, Enum):
+    """Analysis status values."""
+    CREATED = "created"
+    VALIDATING = "validating"
+    FETCHING_MARKET_DATA = "fetching_market_data"
+    DETECTING_PATTERNS = "detecting_patterns"
+    INTERPRETING = "interpreting"
+    RENDERING_CHART = "rendering_chart"
+    COMPLETED = "completed"
+    NO_RESULT = "no_result"
+    FAILED_UPSTREAM = "failed_upstream"
+    FAILED_MODEL = "failed_model"
+    FAILED_CHART = "failed_chart"
+    REJECTED = "rejected"
+
+
+class ErrorCode(str, Enum):
+    """Standard error codes for API responses."""
+    INVALID_PARAMS = "INVALID_PARAMS"
+    MARKET_DATA_UNAVAILABLE = "MARKET_DATA_UNAVAILABLE"
+    NO_PATTERNS_FOUND = "NO_PATTERNS_FOUND"
+    MODEL_ERROR = "MODEL_ERROR"
+    CHART_ERROR = "CHART_ERROR"
+    INTERNAL_ERROR = "INTERNAL_ERROR"
+    QUOTA_EXCEEDED = "QUOTA_EXCEEDED"
+    UNAUTHORIZED = "UNAUTHORIZED"
+    NOT_IMPLEMENTED = "NOT_IMPLEMENTED"

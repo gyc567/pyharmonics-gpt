@@ -3,6 +3,28 @@ from flask import Flask, jsonify, request, render_template
 import os
 import yaml
 import logging
+import uuid
+
+# New SaaS API imports
+from app.api.middleware import register_error_handlers, log_request_middleware
+from app.api.auth import require_auth, check_quota
+from app.domain.enums import Market, Interval, AnalysisType, ErrorCode
+from app.domain.schemas import (
+    AnalyzeRequest,
+    SuccessResponse,
+    ErrorResponse,
+    HealthResponse,
+    MarketsResponse,
+)
+from app.services.analysis import AnalysisOrchestrator
+from app.infra.supabase_client import (
+    create_analysis_record,
+    update_analysis_record,
+    consume_ledger_quota,
+    release_ledger_quota,
+    log_audit_event,
+)
+from app.api.errors import AppError
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -10,8 +32,155 @@ logging.basicConfig(level=logging.INFO)
 # Initialize Flask app
 app = Flask(__name__)
 
+# Register middleware
+register_error_handlers(app)
+log_request_middleware(app)
+
 prompt_context = yaml.safe_load(open("prompt_intent.yaml", "r"))
 logging.debug(f"Loaded model context: {prompt_context}")
+
+# Initialize orchestrator
+orchestrator = AnalysisOrchestrator(prompt_context=prompt_context)
+
+
+# ---- New SaaS API Routes ----
+
+@app.route('/api/health', methods=['GET'])
+def health_check():
+    """Health check endpoint."""
+    import time
+    return jsonify(
+        HealthResponse(timestamp=str(int(time.time()))).model_dump()
+    ), 200
+
+
+@app.route('/api/markets', methods=['GET'])
+def get_markets():
+    """Return supported markets, intervals, and analysis types."""
+    return jsonify(
+        MarketsResponse(
+            markets=[m.value for m in Market],
+            intervals=[i.value for i in Interval],
+            analysis_types=[a.value for a in AnalysisType],
+        ).model_dump()
+    ), 200
+
+
+@app.route('/api/analyze', methods=['POST'])
+@require_auth
+def analyze():
+    """Structured analysis endpoint with auth and quota.
+
+    Expects JSON body matching AnalyzeRequest schema.
+    Requires Authorization: Bearer <token> header.
+    Returns structured analysis results.
+    """
+    user = request.user
+    user_id = user.get("id")
+
+    try:
+        data = request.get_json(force=True, silent=True)
+    except Exception:
+        data = None
+
+    if not data:
+        return jsonify(
+            ErrorResponse(
+                error={
+                    "code": "INVALID_PARAMS",
+                    "message": "Request body must be valid JSON.",
+                    "retryable": False,
+                    "request_id": "",
+                }
+            ).model_dump()
+        ), 400
+
+    # Validate request
+    try:
+        req = AnalyzeRequest(**data)
+    except Exception as e:
+        logging.warning("Validation error: %s", e)
+        return jsonify(
+            ErrorResponse(
+                error={
+                    "code": "INVALID_PARAMS",
+                    "message": f"Invalid request parameters: {str(e)}",
+                    "retryable": False,
+                    "request_id": "",
+                }
+            ).model_dump()
+        ), 400
+
+    # Reserve quota
+    analysis_id = str(uuid.uuid4())
+    reserved, remaining, ledger_id = check_quota(user_id, analysis_id, units=1)
+    if not reserved:
+        return jsonify(
+            ErrorResponse(
+                error={
+                    "code": "QUOTA_EXCEEDED",
+                    "message": f"Daily quota exceeded. Remaining: {remaining}",
+                    "retryable": False,
+                    "request_id": "",
+                }
+            ).model_dump()
+        ), 429
+
+    # Create analysis record
+    create_analysis_record(user_id, {
+        "input_mode": "form",
+        "market": req.market.value,
+        "symbol": req.symbol,
+        "interval": req.interval.value,
+        "analysis_type": req.analysis_type.value,
+        "parameters": req.model_dump(),
+        "status": "created",
+    })
+
+    # Run analysis
+    try:
+        result = orchestrator.analyze(req, user_id=user_id, analysis_id=analysis_id)
+
+        # Consume quota
+        if ledger_id:
+            consume_ledger_quota(
+                ledger_id,
+                input_tokens=result.timing.get("input_tokens") if hasattr(result, "timing") else None,
+                output_tokens=result.timing.get("output_tokens") if hasattr(result, "timing") else None,
+            )
+
+        # Log audit
+        log_audit_event(
+            actor_id=user_id,
+            action="analysis_completed",
+            target_type="analysis",
+            target_id=analysis_id,
+            details={"symbol": req.symbol, "market": req.market.value},
+        )
+
+        return jsonify(
+            SuccessResponse(data=result.model_dump()).model_dump()
+        ), 200
+
+    except AppError as e:
+        # Release quota on failure
+        if ledger_id:
+            release_ledger_quota(ledger_id)
+        raise
+    except Exception as e:
+        # Release quota on unexpected failure
+        if ledger_id:
+            release_ledger_quota(ledger_id)
+        logging.exception("Analysis failed")
+        raise AppError(
+            ErrorCode.INTERNAL_ERROR,
+            "Analysis failed. Please try again.",
+            retryable=True,
+            original_error=e,
+        )
+
+
+# ---- Existing Routes (Unchanged) ----
 
 # Route to interact with OpenAI's GPT-3
 @app.route('/query', methods=['POST'])
@@ -23,7 +192,9 @@ def query_openai_route():
     """
     try:
         # Get JSON data from the request
-        data = request.get_json()
+        data = request.get_json(force=True, silent=True)
+        if data is None:
+            return jsonify({"error": "Invalid JSON"}), 400
         user_prompt = data.get('prompt')
 
         # User prompt isd required
