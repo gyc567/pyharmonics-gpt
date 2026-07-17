@@ -177,7 +177,9 @@ class TestAnalysisOrchestrator:
         result = orchestrator.analyze(valid_request)
         assert result.status == Status.COMPLETED
         assert result.technical_result.pattern_family == "XABCD"
-        assert result.technical_result.entry_price == 100.0
+        # v4 unified contract: no signal was built (mock has no raw_assessment),
+        # so legacy entry/stop/target stay None instead of echoing the library.
+        assert result.technical_result.entry_price is None
 
     @patch("app.services.analysis.fetch_market_data")
     @patch("app.services.analysis.detect_patterns")

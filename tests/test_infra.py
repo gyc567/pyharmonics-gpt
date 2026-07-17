@@ -14,7 +14,7 @@ from app.api.errors import AppError
 
 
 class TestFetchMarketData:
-    @patch("app.infra.pyharmonics_adapter.BinanceCandleData")
+    @patch("app.infra.pyharmonics_adapter.DirectBinanceCandleData")
     def test_fetch_binance_success(self, mock_cls):
         mock_instance = MagicMock()
         mock_cls.return_value = mock_instance
@@ -42,7 +42,7 @@ class TestFetchMarketData:
         mock_instance.get_candles.assert_called_once_with("AAPL", "1d", 500)
         assert result == mock_instance
 
-    @patch("app.infra.pyharmonics_adapter.BinanceCandleData")
+    @patch("app.infra.pyharmonics_adapter.DirectBinanceCandleData")
     def test_fetch_binance_failure(self, mock_cls):
         mock_cls.side_effect = Exception("Network error")
 
@@ -234,6 +234,8 @@ class TestTechnicalResultToSchema:
         assert result.pattern_type == "forming"
 
     def test_with_position(self):
+        # v4 unified contract: without a signal, legacy fields stay None
+        # rather than echoing the library's raw position values.
         mock_position = MagicMock()
         mock_position.strike = 100.0
         mock_position.stop_loss = 95.0
@@ -245,10 +247,43 @@ class TestTechnicalResultToSchema:
             "position": mock_position,
             "divergences": {},
         })
+        assert result.entry_price is None
+        assert result.stop_loss is None
+        assert result.target_price is None
+        assert result.risk_reward_ratio is None
+
+    @staticmethod
+    def _signal_dict(**overrides):
+        base = {
+            "status": "confirmed", "grade": "A", "direction": "long",
+            "pattern_name": "gartley", "family": "XABCD", "formed": True,
+            "entry_zone": [95.0, 105.0], "entry_reference": 100.0,
+            "stop_loss": 95.0,
+            "targets": [{"label": "TP1", "price": 110.0}, {"label": "TP2", "price": 120.0}],
+            "net_rr_tp2": 2.0,
+        }
+        base.update(overrides)
+        return base
+
+    def test_with_signal_derives_legacy_fields(self):
+        # v4 unified contract: legacy fields mirror the validated signal.
+        result = technical_result_to_schema(
+            {"patterns": {"family": "XABCD"}, "divergences": {}},
+            signal=self._signal_dict(),
+        )
         assert result.entry_price == 100.0
         assert result.stop_loss == 95.0
         assert result.target_price == 110.0
         assert result.risk_reward_ratio == 2.0
+        assert result.signal is not None
+
+    def test_with_signal_no_targets(self):
+        result = technical_result_to_schema(
+            {"patterns": {}, "divergences": {}},
+            signal=self._signal_dict(targets=[], net_rr_tp2=None),
+        )
+        assert result.target_price is None
+        assert result.risk_reward_ratio is None
 
     def test_with_divergences(self):
         result = technical_result_to_schema({

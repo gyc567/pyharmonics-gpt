@@ -1,0 +1,296 @@
+"""Pure harmonic trading-signal math.
+
+This module is the domain core of the signal engine: every function is pure
+(no I/O, no logging, no external state) so it can be unit-tested to 100%
+coverage. All prices are plain floats, directions are "long"/"short" strings.
+
+Design rules encoded here (see docs/plans/harmonic-signal-optimization-plan.md):
+- Stop loss sits at the pattern invalidation point (X for Gartley/Bat families,
+  beyond the PRZ outer edge for Butterfly/Crab families) plus an ATR buffer.
+- Take profits are Fibonacci retraces/extensions of the A-D leg: 38.2% / 61.8%
+  (retracement) and 127.2% (extension).
+- Risk/reward is computed net of fees and slippage.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Optional
+
+# --- Constants ---------------------------------------------------------------
+
+FIB_TP1 = 0.382
+FIB_TP2 = 0.618
+FIB_TP3 = 1.272
+
+ATR_STOP_BUFFER = 0.5
+ATR_PRZ_SWEEP = 0.3
+
+# Binance USDT-M taker fee both sides (0.05% x 2) plus slippage allowance.
+FEE_RATE = 0.001
+SLIPPAGE_RATE = 0.0005
+
+TP_CLOSE_PCTS = (50, 30, 20)
+
+# Extended patterns complete beyond X, so X is not the invalidation anchor.
+EXTENDED_PATTERNS = {"butterfly", "deep butterfly", "crab", "deep crab", "shark", "deep shark"}
+
+LONG = "long"
+SHORT = "short"
+
+
+# --- Value objects -----------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Candidate:
+    """A serializable harmonic pattern candidate extracted from pyharmonics."""
+
+    family: str            # XABCD | ABCD | ABC
+    name: str              # gartley, bat, butterfly, ...
+    bullish: bool
+    formed: bool
+    points: tuple          # price points (X,A,B,C,D) / (A,B,C,D) / (A,B,C)
+    completion_min: float  # PRZ lower bound
+    completion_max: float  # PRZ upper bound
+    times: tuple = ()      # candle close_times of the points (D is last)
+
+    @property
+    def direction(self) -> str:
+        return LONG if self.bullish else SHORT
+
+    @property
+    def x_price(self) -> float:
+        return float(self.points[0])
+
+    @property
+    def a_price(self) -> float:
+        # XABCD: A is points[1]; ABCD/ABC families have no X, A is points[0].
+        return float(self.points[1]) if self.family == "XABCD" else float(self.points[0])
+
+    @property
+    def prz_low(self) -> float:
+        return min(self.completion_min, self.completion_max)
+
+    @property
+    def prz_high(self) -> float:
+        return max(self.completion_min, self.completion_max)
+
+
+@dataclass(frozen=True)
+class SignalTarget:
+    label: str
+    price: float
+    fib_basis: str
+    close_pct: int
+    move_stop_to: str
+
+
+@dataclass(frozen=True)
+class Signal:
+    """A fully specified, executable trade signal."""
+
+    status: str            # approaching | in_prz | confirmed | swept
+    grade: str             # A | B | C
+    direction: str         # long | short
+    pattern_name: str
+    family: str
+    formed: bool
+    entry_zone: tuple      # (low, high)
+    entry_reference: float
+    stop_loss: float
+    stop_basis: str
+    targets: tuple         # tuple[SignalTarget, ...]
+    net_rr_tp1: float
+    net_rr_tp2: float
+    confluence_score: int
+    confluence: dict = field(default_factory=dict)
+    htf_trend: str = "unknown"
+    invalidation: float = 0.0
+    reasoning: str = ""
+    sharpe: Optional[float] = None
+    regime: str = "normal"
+    position_multiplier: Optional[float] = None
+    stability_score: Optional[int] = None
+    trap_score: Optional[int] = None
+
+    def to_dict(self) -> dict:
+        return {
+            "status": self.status,
+            "grade": self.grade,
+            "direction": self.direction,
+            "pattern_name": self.pattern_name,
+            "family": self.family,
+            "formed": self.formed,
+            "entry_zone": [self.entry_zone[0], self.entry_zone[1]],
+            "entry_reference": self.entry_reference,
+            "stop_loss": self.stop_loss,
+            "stop_basis": self.stop_basis,
+            "targets": [
+                {
+                    "label": t.label,
+                    "price": t.price,
+                    "fib_basis": t.fib_basis,
+                    "close_pct": t.close_pct,
+                    "move_stop_to": t.move_stop_to,
+                }
+                for t in self.targets
+            ],
+            "net_rr_tp1": self.net_rr_tp1,
+            "net_rr_tp2": self.net_rr_tp2,
+            "confluence_score": self.confluence_score,
+            "confluence": dict(self.confluence),
+            "htf_trend": self.htf_trend,
+            "invalidation": self.invalidation,
+            "reasoning": self.reasoning,
+            "sharpe": self.sharpe,
+            "regime": self.regime,
+            "position_multiplier": self.position_multiplier,
+            "stability_score": self.stability_score,
+            "trap_score": self.trap_score,
+        }
+
+
+# --- PRZ state machine --------------------------------------------------------
+
+
+def prz_state(price: float, prz_low: float, prz_high: float, swept: bool) -> str:
+    """Classify the current price relative to the PRZ.
+
+    swept: whether price pierced beyond the PRZ but returned inside it.
+    """
+    if swept:
+        return "swept"
+    if prz_low <= price <= prz_high:
+        return "in_prz"
+    return "approaching"
+
+
+def is_swept(low: float, high: float, close: float, prz_low: float, prz_high: float) -> bool:
+    """Detect a liquidity sweep: wick beyond the PRZ, close back inside it."""
+    pierced_below = low < prz_low <= close <= prz_high
+    pierced_above = high > prz_high >= close >= prz_low
+    return pierced_below or pierced_above
+
+
+# --- Stop loss ----------------------------------------------------------------
+
+
+def compute_stop(candidate: Candidate, atr: float) -> tuple[float, str]:
+    """Stop at the structural invalidation point plus an ATR buffer.
+
+    Returns (stop_price, basis_label).
+    """
+    buffer = ATR_STOP_BUFFER * atr
+    extended = candidate.name.lower() in EXTENDED_PATTERNS
+    if candidate.bullish:
+        anchor = candidate.prz_low if extended else min(candidate.x_price, candidate.prz_low)
+        return round(anchor - buffer, 8), "X/PRZ invalidation - 0.5*ATR"
+    anchor = candidate.prz_high if extended else max(candidate.x_price, candidate.prz_high)
+    return round(anchor + buffer, 8), "X/PRZ invalidation + 0.5*ATR"
+
+
+# --- Take profits -------------------------------------------------------------
+
+
+def compute_targets(candidate: Candidate, entry: float) -> tuple:
+    """Fibonacci ladder on the A-D leg: 38.2% / 61.8% retrace, 127.2% extension."""
+    a = candidate.a_price
+    d = entry  # entry stands in for D (the completion point we trade from)
+    span = abs(a - d)
+    if candidate.bullish:
+        prices = (d + FIB_TP1 * span, d + FIB_TP2 * span, d + FIB_TP3 * span)
+    else:
+        prices = (d - FIB_TP1 * span, d - FIB_TP2 * span, d - FIB_TP3 * span)
+    labels = ("TP1", "TP2", "TP3")
+    bases = ("AD 38.2% retrace", "AD 61.8% retrace", "AD 127.2% extension")
+    stops = ("breakeven", "tp1", "trail 1*ATR")
+    return tuple(
+        SignalTarget(
+            label=labels[i],
+            price=round(prices[i], 8),
+            fib_basis=bases[i],
+            close_pct=TP_CLOSE_PCTS[i],
+            move_stop_to=stops[i],
+        )
+        for i in range(3)
+    )
+
+
+# --- Net risk/reward ----------------------------------------------------------
+
+
+def net_rr(entry: float, stop: float, target: float, fee_rate: float = FEE_RATE,
+           slippage_rate: float = SLIPPAGE_RATE) -> Optional[float]:
+    """Risk/reward of one target, net of round-trip fees and slippage.
+
+    Costs are approximated as (fee + slippage) on both entry and exit notional.
+    Returns None when the setup has no positive risk (degenerate geometry).
+    """
+    risk = abs(entry - stop)
+    if risk <= 0 or entry <= 0:
+        return None
+    cost = 2.0 * (fee_rate + slippage_rate) * entry
+    reward = abs(target - entry) - cost
+    net_risk = risk + cost
+    if reward <= 0 or net_risk <= 0:
+        return None
+    return round(reward / net_risk, 4)
+
+
+# --- Grading ------------------------------------------------------------------
+
+
+def grade(score: int, rr_tp1: Optional[float], rr_tp2: Optional[float],
+          htf_aligned: bool, htf_counter: bool, a_min: int = 75) -> Optional[str]:
+    """Heuristic A/B/C grade (to be replaced by calibrated quantiles in P3).
+
+    Hard gates: TP1 net R >= 1.0 and TP2 net R >= 1.5, otherwise the signal is
+    observation-only (C). Counter-trend signals are capped at C. ``a_min`` is
+    the A-grade score threshold (raised in high-quant regimes).
+    """
+    if rr_tp1 is None or rr_tp2 is None:
+        return None
+    if htf_counter:
+        return "C" if score >= 45 else None
+    if rr_tp1 < 1.0 or rr_tp2 < 1.5:
+        return "C" if score >= 45 else None
+    if score >= a_min and rr_tp2 >= 2.0 and htf_aligned:
+        return "A"
+    if score >= 60:
+        return "B"
+    if score >= 45:
+        return "C"
+    return None
+
+
+def resolve_analysis_type(signal: Optional[Signal]) -> Optional[str]:
+    """Resolve the analysis type actually used, from the engine's output.
+
+    Signal-centric rule (single source of truth): when a signal exists, the
+    resolved type mirrors its formed/forming attribute; without a signal the
+    answer is None ("no valid signal") -- never a guess based on raw
+    candidates, which could contradict what the user actually sees.
+    """
+    if signal is None:
+        return None
+    return "formed" if signal.formed else "forming"
+
+
+def reasoning_from_signal(signal: Signal) -> str:
+    """Build the human-readable reasoning text for a signal (Chinese template)."""
+    direction = "做多" if signal.direction == LONG else "做空"
+    formed = "formed" if signal.formed else "forming"
+    lines = [
+        f"方向：{direction}（{signal.pattern_name} · {signal.family} · {formed}）",
+        f"入场区：{signal.entry_zone[0]:.2f} – {signal.entry_zone[1]:.2f}（参考 {signal.entry_reference:.2f}）",
+        f"止损：{signal.stop_loss:.2f}（{signal.stop_basis}）",
+    ]
+    if signal.targets:
+        tps = " / ".join(
+            f"{t.label} {t.price:.2f}（{t.fib_basis}，平 {t.close_pct}%）"
+            for t in signal.targets
+        )
+        lines.append(f"止盈：{tps}")
+    lines.append(f"净盈亏比：TP1 {signal.net_rr_tp1}R / TP2 {signal.net_rr_tp2}R")
+    lines.append(f"高周期趋势：{signal.htf_trend}")
+    return "\n".join(lines)

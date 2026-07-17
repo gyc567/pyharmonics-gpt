@@ -170,3 +170,7 @@ cython_debug/
 # PyPI configuration file
 .pypirc
 .vercel
+
+# Local AI assistant tooling (not project code)
+.agents/
+.claude/

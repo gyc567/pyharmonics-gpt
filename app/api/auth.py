@@ -1,5 +1,6 @@
 """Authentication helpers for API endpoints."""
 import logging
+import os
 from functools import wraps
 from typing import Optional, Dict, Any, Callable
 from flask import request, jsonify
@@ -32,14 +33,32 @@ def get_auth_token() -> Optional[str]:
     return None
 
 
+LOCAL_DEV_USER: Dict[str, Any] = {
+    "id": "local-dev-user",
+    "email": "dev@localhost",
+    "role": "admin",
+    "status": "active",
+    "daily_quota": 100,
+    "used_quota": 0,
+}
+
+
 def require_auth(f: Callable) -> Callable:
     """Decorator to require valid Supabase auth token.
 
     Injects `user` dict into kwargs if valid.
     Returns 401 if missing or invalid.
+
+    Local development bypass:
+      Set DISABLE_AUTH=1 in the environment to skip token verification.
+      This is ONLY for local dev/testing and must never be enabled in production.
     """
     @wraps(f)
     def wrapper(*args, **kwargs):
+        if os.getenv("DISABLE_AUTH") == "1":
+            kwargs["user"] = LOCAL_DEV_USER
+            return f(*args, **kwargs)
+
         token = get_auth_token()
         if not token:
             return jsonify({

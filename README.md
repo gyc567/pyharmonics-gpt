@@ -76,3 +76,25 @@ See the video tutorial for more. https://www.youtube.com/watch?v=GZ-O5SlJjVc
 
 ![Desktop UI](pyharmonics.png)
 
+---
+
+## 新版 SaaS 前端（Beta）
+
+项目已新增基于 Next.js 14 + TypeScript + Tailwind CSS 的 SaaS 前端，参考 `docs/frontend-design-2026-07-14.md` 实现。
+
+```bash
+cd frontend
+cp .env.example .env.local
+# 配置 NEXT_PUBLIC_SUPABASE_URL 与 NEXT_PUBLIC_SUPABASE_ANON_KEY
+npm install
+npm run dev
+```
+
+本地开发时，Next.js 会将 `/api/*` 请求代理到后端的 Flask 服务（默认 `http://127.0.0.1:5000`）。
+
+主要页面：
+- `/login` — 邮箱魔法链接登录
+- `/dashboard` — 分析工作台
+- `/history` — 历史记录
+- `/settings` — 账户与主题
+- `/admin` — 管理员面板

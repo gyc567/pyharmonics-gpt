@@ -66,16 +66,16 @@ def get_markets():
     ), 200
 
 
+
 @app.route('/api/analyze', methods=['POST'])
 @require_auth
-def analyze():
+def analyze(user):
     """Structured analysis endpoint with auth and quota.
 
     Expects JSON body matching AnalyzeRequest schema.
     Requires Authorization: Bearer <token> header.
     Returns structured analysis results.
     """
-    user = request.user
     user_id = user.get("id")
 
     try:
@@ -113,7 +113,11 @@ def analyze():
 
     # Reserve quota
     analysis_id = str(uuid.uuid4())
-    reserved, remaining, ledger_id = check_quota(user_id, analysis_id, units=1)
+    if os.getenv("DISABLE_AUTH") == "1":
+        # Local dev mode: skip Supabase quota reservation
+        reserved, remaining, ledger_id = True, 100, None
+    else:
+        reserved, remaining, ledger_id = check_quota(user_id, analysis_id, units=1)
     if not reserved:
         return jsonify(
             ErrorResponse(
@@ -178,6 +182,36 @@ def analyze():
             retryable=True,
             original_error=e,
         )
+
+
+@app.route('/api/history', methods=['GET'])
+@require_auth
+def history(user):
+    """Return analysis history.
+
+    Currently returns an empty placeholder list. Persisted history should be
+    fetched from the database once the schema and RLS policies are ready.
+    """
+    return jsonify({"success": True, "data": {"items": [], "total": 0}}), 200
+
+
+@app.route('/api/analysis/<analysis_id>', methods=['GET'])
+@require_auth
+def analysis_detail(user, analysis_id):
+    """Return a single analysis record by ID.
+
+    Currently returns a 404 placeholder. Real implementation should query the
+    analyses table and verify ownership via RLS.
+    """
+    return jsonify({
+        "success": False,
+        "error": {
+            "code": ErrorCode.NOT_FOUND.value,
+            "message": "Analysis not found.",
+            "retryable": False,
+            "request_id": "",
+        },
+    }), 404
 
 
 # ---- Existing Routes (Unchanged) ----

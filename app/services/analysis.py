@@ -2,6 +2,7 @@
 import logging
 import time
 import uuid
+from types import SimpleNamespace
 from typing import Optional
 from app.domain.enums import Market, Interval, AnalysisType, Status, ErrorCode
 from app.domain.schemas import (
@@ -26,6 +27,8 @@ from app.infra.pyharmonics_adapter import (
     generate_chart,
     technical_result_to_schema,
 )
+from app.domain.signals import resolve_analysis_type
+from app.services.signal_engine import build_signal, extract_candidates
 from app.infra.supabase_client import upload_chart, get_chart_url
 from app.services.chart import compress_chart, validate_chart_size
 from app.openai_handler import query_openai
@@ -91,6 +94,49 @@ class AnalysisOrchestrator:
             prompt_context: Loaded prompt_intent.yaml dict.
         """
         self.prompt_context = prompt_context or {}
+
+    @staticmethod
+    def _build_trade_signal(candle_data, interval, detection_result: dict,
+                            limit_to: int = 10, percent_complete: float = 0.8):
+        """Build a trade signal from the detection result (best-effort).
+
+        Signal generation never blocks the analysis pipeline: any failure is
+        logged and results in no signal attached.
+        """
+        try:
+            candidates = extract_candidates(detection_result)
+            if not candidates:
+                return None
+
+            def detect_on_slice(slice_df):
+                """Re-run pattern detection on a sub-window (stability check)."""
+                try:
+                    proxy = SimpleNamespace(
+                        df=slice_df,
+                        symbol=candle_data.symbol,
+                        interval=candle_data.interval,
+                    )
+                    det = detect_patterns(
+                        proxy,
+                        limit_to=limit_to,
+                        percent_complete=percent_complete,
+                        analysis_type="forming",
+                    )
+                    sub_candidates = extract_candidates(det)
+                    return sub_candidates[0].name if sub_candidates else None
+                except Exception:
+                    return None
+
+            return build_signal(
+                df=candle_data.df,
+                interval=interval.value,
+                candidates=candidates,
+                divergences=detection_result.get("divergences", {}),
+                stability_detector=detect_on_slice,
+            )
+        except Exception:
+            logger.exception("Signal engine failed, continuing without signal")
+            return None
 
     def analyze(self, request: AnalyzeRequest, user_id: Optional[str] = None, analysis_id: Optional[str] = None) -> AnalysisData:
         """Run full analysis pipeline.
@@ -168,8 +214,21 @@ class AnalysisOrchestrator:
                 timing=timing,
             )
 
-        # Step 4: Technical result
-        technical = technical_result_to_schema(detection_result)
+        # Step 4: Technical result (+ executable trade signal, best-effort)
+        signal = self._build_trade_signal(
+            candle_data,
+            interval,
+            detection_result,
+            limit_to=request.limit_to,
+            percent_complete=request.percent_complete,
+        )
+        technical = technical_result_to_schema(
+            detection_result,
+            signal=signal.to_dict() if signal else None,
+        )
+        # resolved_type: what the engine actually used (auto mode's answer).
+        # request value stays in AnalysisData.analysis_type unchanged.
+        technical.resolved_type = resolve_analysis_type(signal)
 
         # Step 5: Interpretation (optional - can fail without failing whole analysis)
         interpretation = Interpretation()

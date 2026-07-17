@@ -37,6 +37,43 @@ class TimingInfo(BaseModel):
     completed_at: Optional[str] = None
 
 
+class SignalTarget(BaseModel):
+    """One take-profit rung of a trade signal."""
+    label: str
+    price: float
+    fib_basis: Optional[str] = None
+    close_pct: Optional[int] = None
+    move_stop_to: Optional[str] = None
+
+
+class Signal(BaseModel):
+    """Executable trade signal with strict stop loss and TP ladder."""
+    status: str
+    grade: str
+    direction: str
+    pattern_name: str
+    family: str
+    formed: bool
+    entry_zone: list[float]
+    entry_reference: float
+    stop_loss: float
+    stop_basis: Optional[str] = None
+    targets: list[SignalTarget] = Field(default_factory=list)
+    net_rr_tp1: Optional[float] = None
+    net_rr_tp2: Optional[float] = None
+    confluence_score: Optional[int] = None
+    confluence: dict = Field(default_factory=dict)
+    htf_trend: Optional[str] = None
+    invalidation: Optional[float] = None
+    # v4 validity metadata
+    reasoning: Optional[str] = None
+    sharpe: Optional[float] = None
+    regime: Optional[str] = None
+    position_multiplier: Optional[float] = None
+    stability_score: Optional[int] = None
+    trap_score: Optional[int] = None
+
+
 class TechnicalResult(BaseModel):
     """Deterministic technical analysis output."""
     pattern_family: Optional[str] = None
@@ -49,6 +86,10 @@ class TechnicalResult(BaseModel):
     confidence: Optional[str] = None
     divergences: dict = Field(default_factory=dict)
     raw_patterns: dict = Field(default_factory=dict)
+    signal: Optional[Signal] = None
+    # The analysis type the engine actually used ("formed"/"forming"/None).
+    # Distinct from pattern_type, which is raw detection info.
+    resolved_type: Optional[str] = None
 
 
 class Interpretation(BaseModel):

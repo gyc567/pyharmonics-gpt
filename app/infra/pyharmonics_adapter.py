@@ -3,7 +3,8 @@ import logging
 from typing import Any, Optional
 
 # Import pyharmonics classes at module level for testability
-from pyharmonics.marketdata import YahooCandleData, BinanceCandleData
+from pyharmonics.marketdata import YahooCandleData
+from app.infra.marketdata import DirectBinanceCandleData
 from pyharmonics.technicals import OHLCTechnicals
 from pyharmonics.search import HarmonicSearch, DivergenceSearch
 from pyharmonics.plotter import HarmonicPlotter, PositionPlotter
@@ -38,7 +39,7 @@ def fetch_market_data(
     """
     try:
         if market == Market.BINANCE:
-            cd = BinanceCandleData()
+            cd = DirectBinanceCandleData()
             cd.get_candles(symbol, interval.value, candles)
             return cd
         elif market == Market.YAHOO:
@@ -88,7 +89,9 @@ def detect_patterns(
         d = DivergenceSearch(t)
         p = HarmonicPlotter(t)
 
-        if analysis_type == "forming":
+        # "auto" runs the full pipeline, same as an explicit "forming" request;
+        # "formed"/"divergence" skip the forming scan to save compute.
+        if analysis_type in ("forming", "auto"):
             hs.forming(limit_to=limit_to, percent_c_to_d=percent_complete)
         hs.search(limit_to=limit_to)
         d.search(limit_to=limit_to)
@@ -115,6 +118,7 @@ def detect_patterns(
             "patterns": {},
             "position": None,
             "plot": None,
+            "raw_assessment": assessment,
         }
 
         # Find best pattern
@@ -226,11 +230,15 @@ def generate_chart(
         )
 
 
-def technical_result_to_schema(detection_result: dict) -> TechnicalResult:
+def technical_result_to_schema(
+    detection_result: dict,
+    signal: Optional[dict] = None,
+) -> TechnicalResult:
     """Convert raw detection result to TechnicalResult schema.
 
     Args:
         detection_result: Raw dict from detect_patterns.
+        signal: Optional trade signal dict (from the signal engine).
 
     Returns:
         TechnicalResult schema instance.
@@ -244,12 +252,17 @@ def technical_result_to_schema(detection_result: dict) -> TechnicalResult:
         direction=patterns.get("direction"),
         divergences=detection_result.get("divergences", {}),
         raw_patterns=patterns,
+        signal=signal,
     )
 
-    if position:
-        result.entry_price = getattr(position, "strike", None)
-        result.stop_loss = getattr(position, "stop_loss", None)
-        result.target_price = getattr(position, "target", None)
-        result.risk_reward_ratio = getattr(position, "risk_reward", None)
+    # Unified output contract: entry/stop/target/RR come from the validated
+    # trade signal only. Without a signal they stay None rather than showing
+    # the library's raw defaults, which once contradicted the signal card.
+    if signal:
+        result.entry_price = signal.get("entry_reference")
+        result.stop_loss = signal.get("stop_loss")
+        targets = signal.get("targets") or []
+        result.target_price = targets[0].get("price") if targets else None
+        result.risk_reward_ratio = signal.get("net_rr_tp2")
 
     return result

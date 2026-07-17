@@ -18,7 +18,13 @@ class Interval(str, Enum):
 
 
 class AnalysisType(str, Enum):
-    """Supported analysis types."""
+    """Supported analysis types.
+
+    AUTO runs the full detection pipeline (forming + formed + divergence)
+    and lets the signal engine decide what was actually found, reported
+    back via ``TechnicalResult.resolved_type``.
+    """
+    AUTO = "auto"
     FORMING = "forming"
     FORMED = "formed"
     DIVERGENCE = "divergence"
