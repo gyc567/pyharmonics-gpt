@@ -7,7 +7,8 @@ import uuid
 
 # New SaaS API imports
 from app.api.middleware import register_error_handlers, log_request_middleware
-from app.api.auth import require_auth, check_quota
+from app.api.auth import require_auth, check_quota, is_local_dev_mode
+from app.api.vibe_routes import vibe_bp
 from app.domain.enums import Market, Interval, AnalysisType, ErrorCode
 from app.domain.schemas import (
     AnalyzeRequest,
@@ -36,8 +37,41 @@ app = Flask(__name__)
 register_error_handlers(app)
 log_request_middleware(app)
 
-prompt_context = yaml.safe_load(open("prompt_intent.yaml", "r"))
-logging.debug(f"Loaded model context: {prompt_context}")
+# Register vibe blueprint
+app.register_blueprint(vibe_bp)
+
+
+# Simple CORS support for local dev / preview origins
+@app.before_request
+def before_request_cors():
+    """Handle CORS preflight and stash origin for after_request headers."""
+    origin = request.headers.get("Origin", "")
+    allowed_origins = {
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:5001",
+        "http://127.0.0.1:5001",
+    }
+    if origin in allowed_origins:
+        request._cors_origin = origin  # type: ignore[attr-defined]
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"}), 200
+
+
+@app.after_request
+def after_request_cors(response):
+    """Add CORS headers to allow browser requests from localhost preview origins."""
+    origin = getattr(request, "_cors_origin", None)
+    if origin:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+    return response
+
+with open("prompt_intent.yaml", "r") as _prompt_intent_file:
+    prompt_context = yaml.safe_load(_prompt_intent_file)
+logging.debug("Loaded model context: %s", prompt_context)
 
 # Initialize orchestrator
 orchestrator = AnalysisOrchestrator(prompt_context=prompt_context)
@@ -64,6 +98,25 @@ def get_markets():
             analysis_types=[a.value for a in AnalysisType],
         ).model_dump()
     ), 200
+
+
+@app.route('/api/charts/<name>.png', methods=['GET'])
+def serve_chart(name):
+    """Serve a locally stored chart PNG (fallback when Storage is unavailable).
+
+    Unauthenticated on purpose: charts are public market graphics addressed by
+    an unguessable analysis id; the name whitelist blocks path traversal.
+    """
+    from flask import send_file
+    from app.services.chart_store import chart_file_path
+
+    path = chart_file_path(name)
+    if path is None:
+        return jsonify({"success": False, "error": {
+            "code": "NOT_FOUND", "message": "Chart not found.",
+            "retryable": False, "request_id": "",
+        }}), 404
+    return send_file(path, mimetype="image/png")
 
 
 
@@ -113,7 +166,7 @@ def analyze(user):
 
     # Reserve quota
     analysis_id = str(uuid.uuid4())
-    if os.getenv("DISABLE_AUTH") == "1":
+    if is_local_dev_mode():
         # Local dev mode: skip Supabase quota reservation
         reserved, remaining, ledger_id = True, 100, None
     else:

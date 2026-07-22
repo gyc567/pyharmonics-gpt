@@ -24,10 +24,11 @@ export default defineConfig({
   ],
   webServer: [
     {
-      command: "python -m app.main",
+      command: `${PROJECT_ROOT}/.venv/bin/python -m app.main`,
       cwd: PROJECT_ROOT,
       env: {
         PORT: "5050",
+        DISABLE_AUTH: "1",
       },
       url: "http://127.0.0.1:5050/api/health",
       reuseExistingServer: !process.env.CI,

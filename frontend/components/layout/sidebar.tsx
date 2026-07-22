@@ -7,6 +7,7 @@ import {
   Clock,
   Settings,
   Shield,
+  Sparkles,
   Wallet,
   Zap,
 } from "lucide-react";
@@ -21,6 +22,7 @@ interface SidebarProps {
 const NAV_ITEMS = [
   { href: "/dashboard", label: "分析", icon: BarChart3 },
   { href: "/position", label: "仓位", icon: Wallet },
+  { href: "/vibe", label: "AI 交易助手", icon: Sparkles },
   { href: "/history", label: "历史记录", icon: Clock },
   { href: "/settings", label: "设置", icon: Settings },
 ];

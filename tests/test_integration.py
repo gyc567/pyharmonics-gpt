@@ -1,4 +1,5 @@
 """Integration tests for new API endpoints."""
+import os
 import pytest
 from unittest.mock import MagicMock, patch
 
@@ -9,7 +10,8 @@ from app.main import app
 def client():
     app.config["TESTING"] = True
     with app.test_client() as client:
-        yield client
+        with patch.dict(os.environ, {"DISABLE_AUTH": "1"}, clear=False):
+            yield client
 
 
 class TestHealthEndpoint:

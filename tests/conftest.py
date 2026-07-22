@@ -1,6 +1,19 @@
 import pytest
 from unittest.mock import MagicMock, patch
 
+# Flask 2.x test_client references werkzeug.__version__, which was removed in
+# Werkzeug 3.x. Provide a fallback so the test suite can run with the current
+# dependency resolution. This is a test-only compatibility shim.
+import werkzeug
+
+if not hasattr(werkzeug, "__version__"):
+    try:
+        from importlib.metadata import version as _get_version
+
+        werkzeug.__version__ = _get_version("werkzeug")
+    except Exception:
+        werkzeug.__version__ = "3.0.0"
+
 
 @pytest.fixture
 def mock_yahoo_candle_data():

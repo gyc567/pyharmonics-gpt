@@ -124,9 +124,13 @@ class DirectBinanceCandleData(CandleData):
         Binance returns at most ``MAX_CANDLES`` rows per request. When more are
         requested, walk backwards using ``endTime`` so the final result is the
         most recent ``num_candles`` candles (ascending by open time).
+
+        If ``self.start`` or ``self.end`` are set, they act as absolute bounds
+        (inclusive, milliseconds) and ``num_candles`` becomes a safety cap.
         """
         collected: list = []
-        end_time: Optional[int] = None
+        end_time: Optional[int] = self.end
+        start_time: Optional[int] = self.start
 
         while len(collected) < num_candles:
             batch_size = min(num_candles - len(collected), self.MAX_CANDLES)
@@ -145,11 +149,19 @@ class DirectBinanceCandleData(CandleData):
             if not batch:
                 break
 
+            # Filter out candles before the requested start bound.
+            if start_time is not None:
+                batch = [row for row in batch if row[0] >= start_time]
+                if not batch:
+                    break
+
             collected = batch + collected
             if len(batch) < batch_size:
                 # Exchange has no earlier data.
                 break
             end_time = batch[0][0] - 1
+            if start_time is not None and end_time < start_time:
+                break
 
         return collected
 

@@ -3,7 +3,7 @@ import logging
 import os
 from functools import wraps
 from typing import Optional, Dict, Any, Callable
-from flask import request, jsonify
+from flask import request, jsonify, current_app
 
 from app.api.errors import AppError
 from app.domain.enums import ErrorCode
@@ -22,15 +22,17 @@ logger = logging.getLogger(__name__)
 
 
 def get_auth_token() -> Optional[str]:
-    """Extract Bearer token from Authorization header.
+    """Extract Bearer token from Authorization header or query param.
 
+    Query-param fallback supports EventSource which cannot set headers.
     Returns:
         Token string or None.
     """
     auth_header = request.headers.get("Authorization", "")
     if auth_header.startswith("Bearer "):
         return auth_header[7:]
-    return None
+    # Fallback for SSE: token may be passed as query param.
+    return request.args.get("token")
 
 
 LOCAL_DEV_USER: Dict[str, Any] = {
@@ -43,6 +45,26 @@ LOCAL_DEV_USER: Dict[str, Any] = {
 }
 
 
+def is_local_dev_mode() -> bool:
+    """Return True when local development bypass is active.
+
+    Two modes are supported:
+      1. Explicit: DISABLE_AUTH=1 (intended for local dev/tests).
+      2. Auto dev bypass: Flask debug mode AND no SUPABASE_URL configured.
+         This prevents a misleading 401 for developers who have not set up
+         Supabase yet. It must never trigger in production.
+    """
+    if os.getenv("DISABLE_AUTH") == "1":
+        return True
+    if current_app.debug and not os.getenv("SUPABASE_URL"):
+        logger.warning(
+            "Dev auth bypass active: FLASK_DEBUG=1 and SUPABASE_URL is not set. "
+            "Protected endpoints will accept any token."
+        )
+        return True
+    return False
+
+
 def require_auth(f: Callable) -> Callable:
     """Decorator to require valid Supabase auth token.
 
@@ -51,11 +73,12 @@ def require_auth(f: Callable) -> Callable:
 
     Local development bypass:
       Set DISABLE_AUTH=1 in the environment to skip token verification.
+      In Flask debug mode, auth is also bypassed when SUPABASE_URL is unset.
       This is ONLY for local dev/testing and must never be enabled in production.
     """
     @wraps(f)
     def wrapper(*args, **kwargs):
-        if os.getenv("DISABLE_AUTH") == "1":
+        if is_local_dev_mode():
             kwargs["user"] = LOCAL_DEV_USER
             return f(*args, **kwargs)
 

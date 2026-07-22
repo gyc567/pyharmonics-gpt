@@ -1,9 +1,10 @@
 """Tests for API auth helpers and main.py endpoints."""
+import os
 import pytest
 from unittest.mock import MagicMock, patch
 from flask import Flask
 
-from app.api.auth import get_auth_token, require_auth, check_quota
+from app.api.auth import get_auth_token, require_auth, check_quota, LOCAL_DEV_USER, is_local_dev_mode
 from app.domain.enums import ErrorCode
 
 
@@ -118,6 +119,60 @@ class TestRequireAuthDecorator:
             assert resp.status_code == 403
             data = resp.get_json()
             assert data["error"]["message"] == "Account suspended."
+
+
+class TestRequireAuthBypass:
+    def test_disable_auth_env_bypass(self, app, client):
+        @app.route("/test-auth")
+        @require_auth
+        def handler(user=None):
+            return {"user_id": user["id"]}
+
+        with patch.dict(os.environ, {"DISABLE_AUTH": "1"}, clear=False):
+            with app.test_client() as c:
+                resp = c.get("/test-auth")
+                assert resp.status_code == 200
+                assert resp.get_json() == {"user_id": LOCAL_DEV_USER["id"]}
+
+    def test_dev_auto_bypass_when_debug_and_no_supabase_url(self, app, client):
+        @app.route("/test-auth")
+        @require_auth
+        def handler(user=None):
+            return {"user_id": user["id"]}
+
+        app.debug = True
+        env_patch = {"SUPABASE_URL": ""}
+        with patch.dict(os.environ, env_patch, clear=False):
+            with app.test_client() as c:
+                resp = c.get("/test-auth")
+                assert resp.status_code == 200
+                assert resp.get_json() == {"user_id": LOCAL_DEV_USER["id"]}
+
+    def test_no_dev_bypass_when_not_debug(self, app, client):
+        @app.route("/test-auth")
+        @require_auth
+        def handler(user=None):
+            return {"ok": True}
+
+        app.debug = False
+        env_patch = {"SUPABASE_URL": ""}
+        with patch.dict(os.environ, env_patch, clear=False):
+            with app.test_client() as c:
+                resp = c.get("/test-auth")
+                assert resp.status_code == 401
+
+    def test_no_dev_bypass_when_supabase_url_set(self, app, client):
+        @app.route("/test-auth")
+        @require_auth
+        def handler(user=None):
+            return {"ok": True}
+
+        app.debug = True
+        env_patch = {"SUPABASE_URL": "https://example.supabase.co"}
+        with patch.dict(os.environ, env_patch, clear=False):
+            with app.test_client() as c:
+                resp = c.get("/test-auth")
+                assert resp.status_code == 401
 
 
 class TestCheckQuota:

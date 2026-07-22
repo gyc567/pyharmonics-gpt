@@ -5,6 +5,7 @@ import {
   mockAnalyzeNoResult,
   mockAnalyzeError,
   mockHistoryEmpty,
+  mockChartImage,
 } from "./helpers";
 
 test.describe("分析工作台 (已登录)", () => {
@@ -69,6 +70,18 @@ test.describe("分析工作台 (已登录)", () => {
     await expect(page.getByText(/阶梯止盈/)).toBeVisible();
     await expect(page.getByText(/共振评分 80\/100/)).toBeVisible();
     await expect(page.getByText("自动 → 已形成")).toBeVisible();
+  });
+
+  test("分析结果应展示图表（本地图表通道）", async ({ page }) => {
+    await mockAnalyzeSuccess(page);
+    await mockChartImage(page);
+
+    await page.locator("select").nth(1).selectOption("BTCUSDT");
+    await page.getByRole("button", { name: "开始分析" }).click();
+
+    const chartImg = page.getByRole("img", { name: /分析图表/ });
+    await expect(chartImg).toBeVisible();
+    await expect(chartImg).toHaveAttribute("src", /\/api\/charts\//);
   });
 
   test("无结果场景应展示无结果状态", async ({ page }) => {

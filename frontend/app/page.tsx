@@ -7,6 +7,7 @@ import { useAnalyze } from "@/hooks/use-analyze";
 import { AnalyzeForm } from "@/components/dashboard/analyze-form";
 import { ResultPanel } from "@/components/dashboard/result-panel";
 import { HistoryRail } from "@/components/dashboard/history-rail";
+import { VibeQuickBar } from "@/components/dashboard/vibe-quick-bar";
 import type { AnalysisHistoryItem } from "@/types";
 
 export default function DashboardPage() {
@@ -65,6 +66,11 @@ export default function DashboardPage() {
             disabled={profile ? profile.used_quota >= profile.daily_quota : false}
             onChange={updateField}
             onSubmit={submit}
+          />
+          <VibeQuickBar
+            symbol={form.symbol}
+            market={form.market}
+            interval={form.interval}
           />
           <ResultPanel result={result} loading={loading} error={error} />
         </div>

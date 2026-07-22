@@ -152,9 +152,16 @@ def detect_patterns(
             pos_plot.add_divergence_plots(d.get_patterns())
             result["position"] = position
             result["plot"] = pos_plot
-            result["patterns"]["direction"] = getattr(pattern, "direction", None)
+            # Prefer explicit direction if present; otherwise map pyharmonics'
+            # `bullish` boolean to a canonical direction string.
+            explicit_dir = getattr(pattern, "direction", None)
+            if explicit_dir:
+                result["patterns"]["direction"] = explicit_dir
+            else:
+                result["patterns"]["direction"] = "bullish" if getattr(pattern, "bullish", None) else "bearish"
             result["patterns"]["completion_min"] = getattr(pattern, "completion_min_price", None)
             result["patterns"]["completion_max"] = getattr(pattern, "completion_max_price", None)
+            result["patterns"]["pattern_name"] = getattr(pattern, "name", None)
 
         result["plot_fallback"] = p
         return result
@@ -171,26 +178,30 @@ def detect_patterns(
         )
 
 
-def generate_chart(
+def render_chart(
     detection_result: dict,
     dpi: int = 150,
-    max_width: int = 1200,
-    max_height: int = 800,
-) -> ChartMeta:
-    """Generate chart image from detection result.
+) -> tuple:
+    """Render the detection plot to PNG bytes in a single pass.
+
+    Kaleido serializes figures with orjson, which cannot handle pandas
+    Timestamps (our dts column). The figure is therefore sanitized through
+    plotly's own JSON encoder (Timestamps -> ISO strings) before rendering.
 
     Args:
         detection_result: Result from detect_patterns.
         dpi: DPI for chart rendering.
-        max_width: Maximum width in pixels.
-        max_height: Maximum height in pixels.
 
     Returns:
-        ChartMeta with image metadata.
+        Tuple of (compressed PNG bytes, ChartMeta).
 
     Raises:
         AppError: If chart generation fails.
     """
+    import plotly.io as pio
+
+    from app.services.chart import compress_chart
+
     try:
         plot = detection_result.get("plot") or detection_result.get("plot_fallback")
         if plot is None:
@@ -199,24 +210,15 @@ def generate_chart(
                 "No plot data available for chart generation.",
             )
 
-        image_bytes = plot.to_image(dpi=dpi)
+        safe_fig = pio.from_json(pio.to_json(plot.main_plot))
+        image_bytes = pio.to_image(safe_fig, width=4 * dpi, height=2 * dpi, scale=1)
         if not image_bytes:
             raise AppError(
                 ErrorCode.CHART_ERROR,
                 "Chart rendering returned empty data.",
             )
 
-        # Estimate dimensions (rough: dpi * inches, matplotlib default ~8x6)
-        width = min(int(dpi * 8), max_width)
-        height = min(int(dpi * 6), max_height)
-
-        return ChartMeta(
-            format="png",
-            width=width,
-            height=height,
-            path=None,
-            url=None,
-        )
+        return compress_chart(image_bytes)
 
     except AppError:
         raise
@@ -255,14 +257,35 @@ def technical_result_to_schema(
         signal=signal,
     )
 
-    # Unified output contract: entry/stop/target/RR come from the validated
-    # trade signal only. Without a signal they stay None rather than showing
-    # the library's raw defaults, which once contradicted the signal card.
+    # Unified output contract: when a validated trade signal exists, all
+    # actionable fields (direction, family, entry/stop/target/RR) come from it
+    # so the top-level result is internally consistent. If the signal engine
+    # does not produce a signal (e.g. low confluence score), fall back to the
+    # raw pyharmonics Position so the dashboard still shows levels from the
+    # detected pattern.
     if signal:
+        result.pattern_family = signal.get("family") or patterns.get("family")
+        result.pattern_type = "formed" if signal.get("formed") else "forming"
+        sig_dir = signal.get("direction")
+        result.direction = "bullish" if sig_dir == "long" else "bearish" if sig_dir == "short" else sig_dir
         result.entry_price = signal.get("entry_reference")
         result.stop_loss = signal.get("stop_loss")
         targets = signal.get("targets") or []
         result.target_price = targets[0].get("price") if targets else None
         result.risk_reward_ratio = signal.get("net_rr_tp2")
+        result.confidence = "validated-signal"
+    elif position:
+        # No validated signal, but a harmonic pattern was detected. Surface the
+        # raw pyharmonics Position levels so the dashboard still shows actionable
+        # info; the confidence flag tells consumers these are unvalidated.
+        result.entry_price = float(getattr(position, "strike", 0) or 0) or None
+        result.stop_loss = float(getattr(position, "stop", 0) or 0) or None
+        targets = getattr(position, "targets", []) or []
+        result.target_price = float(targets[0]) if targets else None
+        if result.entry_price and result.stop_loss and result.target_price:
+            risk = abs(result.entry_price - result.stop_loss)
+            reward = abs(result.target_price - result.entry_price)
+            result.risk_reward_ratio = round(reward / risk, 4) if risk > 0 else None
+        result.confidence = "raw-position"
 
     return result

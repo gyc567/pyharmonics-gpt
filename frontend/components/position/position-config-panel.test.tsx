@@ -18,16 +18,104 @@ describe("PositionConfigPanel", () => {
     expect(container.firstChild).toBeNull();
   });
 
-  it("updates total capital", async () => {
+  it("updates total capital on blur", async () => {
     const onChange = vi.fn();
     render(<PositionConfigPanel config={DEFAULT_CONFIG} onChange={onChange} />);
 
-    const input = screen.getByLabelText("总资金（WU）");
-    fireEvent.change(input, { target: { value: "5000" } });
+    const input = screen.getByLabelText("总资金（U）") as HTMLInputElement;
+    await userEvent.clear(input);
+    await userEvent.type(input, "50000");
+    fireEvent.blur(input);
 
     expect(onChange).toHaveBeenCalled();
     const updater = onChange.mock.calls[0][0] as (prev: PositionConfig) => PositionConfig;
-    expect(updater(DEFAULT_CONFIG).totalCapitalWu).toBe(5000);
+    expect(updater(DEFAULT_CONFIG).totalCapitalWu).toBe(5);
+  });
+
+  it("rejects invalid total capital and reverts on blur", async () => {
+    const onChange = vi.fn();
+    render(<PositionConfigPanel config={DEFAULT_CONFIG} onChange={onChange} />);
+
+    const input = screen.getByLabelText("总资金（U）") as HTMLInputElement;
+    await userEvent.clear(input);
+    await userEvent.type(input, "abc");
+    fireEvent.blur(input);
+
+    expect(onChange).not.toHaveBeenCalled();
+    expect(input.value).toBe("100000000");
+    expect(screen.getByText("请输入有效数字")).toBeInTheDocument();
+  });
+
+  it("reverts to current value when cleared and blurred", async () => {
+    const onChange = vi.fn();
+    render(<PositionConfigPanel config={DEFAULT_CONFIG} onChange={onChange} />);
+
+    const input = screen.getByLabelText("总资金（U）") as HTMLInputElement;
+    await userEvent.clear(input);
+    fireEvent.blur(input);
+
+    expect(onChange).not.toHaveBeenCalled();
+    expect(input.value).toBe("100000000");
+  });
+
+  it("shows warning for small total capital", async () => {
+    const onChange = vi.fn();
+    render(<PositionConfigPanel config={DEFAULT_CONFIG} onChange={onChange} />);
+
+    const input = screen.getByLabelText("总资金（U）") as HTMLInputElement;
+    await userEvent.clear(input);
+    await userEvent.type(input, "50");
+    fireEvent.blur(input);
+
+    expect(onChange).toHaveBeenCalled();
+    const updater = onChange.mock.calls[0][0] as (prev: PositionConfig) => PositionConfig;
+    expect(updater(DEFAULT_CONFIG).totalCapitalWu).toBe(0.005);
+    expect(screen.getByText("金额过小，分配将失去参考意义")).toBeInTheDocument();
+  });
+
+  it("updates total capital on Enter", async () => {
+    const onChange = vi.fn();
+    render(<PositionConfigPanel config={DEFAULT_CONFIG} onChange={onChange} />);
+
+    const input = screen.getByLabelText("总资金（U）") as HTMLInputElement;
+    await userEvent.clear(input);
+    await userEvent.type(input, "50000");
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    expect(onChange).toHaveBeenCalled();
+    const updater = onChange.mock.calls[0][0] as (prev: PositionConfig) => PositionConfig;
+    expect(updater(DEFAULT_CONFIG).totalCapitalWu).toBe(5);
+  });
+
+  it("syncs total capital input after applying a recommendation", async () => {
+    const onChange = vi.fn();
+    const { rerender } = render(
+      <PositionConfigPanel config={DEFAULT_CONFIG} onChange={onChange} />
+    );
+
+    const input = screen.getByLabelText("总资金（U）") as HTMLInputElement;
+    await userEvent.clear(input);
+    await userEvent.type(input, "99999999");
+
+    const recommendation = { ...DEFAULT_CONFIG, totalCapitalWu: 5000 };
+    rerender(<PositionConfigPanel config={recommendation} onChange={onChange} />);
+
+    const syncedInput = screen.getByLabelText("总资金（U）") as HTMLInputElement;
+    expect(syncedInput.value).toBe("50000000");
+  });
+
+  it("rejects non-positive total capital and reverts", async () => {
+    const onChange = vi.fn();
+    render(<PositionConfigPanel config={DEFAULT_CONFIG} onChange={onChange} />);
+
+    const input = screen.getByLabelText("总资金（U）") as HTMLInputElement;
+    await userEvent.clear(input);
+    await userEvent.type(input, "0");
+    fireEvent.blur(input);
+
+    expect(onChange).not.toHaveBeenCalled();
+    expect(input.value).toBe("100000000");
+    expect(screen.getByText("必须大于 0")).toBeInTheDocument();
   });
 
   it("applies recommendation", async () => {

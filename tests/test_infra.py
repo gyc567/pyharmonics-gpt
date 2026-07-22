@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 from app.infra.pyharmonics_adapter import (
     fetch_market_data,
     detect_patterns,
-    generate_chart,
+    render_chart,
     technical_result_to_schema,
 )
 from app.domain.enums import Market, Interval, ErrorCode
@@ -171,41 +171,51 @@ class TestDetectPatterns:
 
 
 class TestGenerateChart:
+    """Chart rendering via render_chart (single-pass, plotly-sanitized)."""
+
+    # Minimal fake PNG payload (header + filler); compress_chart falls back
+    # to pass-through when PIL is unavailable, so no real image is needed.
+    _PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+
     def test_generate_with_plot(self):
         mock_plot = MagicMock()
-        mock_plot.to_image.return_value = b"chart_bytes"
-
-        result = generate_chart({"plot": mock_plot})
-        assert result.format == "png"
-        assert result.width is not None
-        assert result.height is not None
+        with patch("plotly.io.to_json", return_value="{}"), \
+             patch("plotly.io.from_json", return_value=MagicMock()), \
+             patch("plotly.io.to_image", return_value=self._PNG):
+            image_bytes, meta = render_chart({"plot": mock_plot})
+        assert meta.format == "png"
+        assert meta.width is not None
+        assert meta.height is not None
+        assert image_bytes.startswith(b"\x89PNG")
 
     def test_generate_with_fallback(self):
         mock_plot = MagicMock()
-        mock_plot.to_image.return_value = b"fallback_bytes"
-
-        result = generate_chart({"plot_fallback": mock_plot})
-        assert result.format == "png"
+        with patch("plotly.io.to_json", return_value="{}"), \
+             patch("plotly.io.from_json", return_value=MagicMock()), \
+             patch("plotly.io.to_image", return_value=self._PNG):
+            _, meta = render_chart({"plot_fallback": mock_plot})
+        assert meta.format == "png"
 
     def test_generate_no_plot(self):
         with pytest.raises(AppError) as exc_info:
-            generate_chart({})
+            render_chart({})
         assert exc_info.value.code == ErrorCode.CHART_ERROR
 
     def test_generate_empty_image(self):
         mock_plot = MagicMock()
-        mock_plot.to_image.return_value = None
-
-        with pytest.raises(AppError) as exc_info:
-            generate_chart({"plot": mock_plot})
+        with patch("plotly.io.to_json", return_value="{}"), \
+             patch("plotly.io.from_json", return_value=MagicMock()), \
+             patch("plotly.io.to_image", return_value=b""):
+            with pytest.raises(AppError) as exc_info:
+                render_chart({"plot": mock_plot})
         assert exc_info.value.code == ErrorCode.CHART_ERROR
 
     def test_generate_exception(self):
         mock_plot = MagicMock()
-        mock_plot.to_image.side_effect = Exception("Render error")
+        mock_plot.main_plot.to_json.side_effect = Exception("Render error")
 
         with pytest.raises(AppError) as exc_info:
-            generate_chart({"plot": mock_plot})
+            render_chart({"plot": mock_plot})
         assert exc_info.value.code == ErrorCode.CHART_ERROR
         assert "图表生成失败" in exc_info.value.message
 
@@ -234,23 +244,24 @@ class TestTechnicalResultToSchema:
         assert result.pattern_type == "forming"
 
     def test_with_position(self):
-        # v4 unified contract: without a signal, legacy fields stay None
-        # rather than echoing the library's raw position values.
+        # Without a validated signal, the adapter falls back to the raw
+        # pyharmonics Position so the UI still shows actionable levels.
+        # Confidence is flagged so consumers know these are unvalidated.
         mock_position = MagicMock()
         mock_position.strike = 100.0
-        mock_position.stop_loss = 95.0
-        mock_position.target = 110.0
-        mock_position.risk_reward = 2.0
+        mock_position.stop = 95.0
+        mock_position.targets = [110.0, 120.0]
 
         result = technical_result_to_schema({
             "patterns": {"family": "XABCD"},
             "position": mock_position,
             "divergences": {},
         })
-        assert result.entry_price is None
-        assert result.stop_loss is None
-        assert result.target_price is None
-        assert result.risk_reward_ratio is None
+        assert result.entry_price == 100.0
+        assert result.stop_loss == 95.0
+        assert result.target_price == 110.0
+        assert result.risk_reward_ratio == 2.0
+        assert result.confidence == "raw-position"
 
     @staticmethod
     def _signal_dict(**overrides):
@@ -276,6 +287,7 @@ class TestTechnicalResultToSchema:
         assert result.target_price == 110.0
         assert result.risk_reward_ratio == 2.0
         assert result.signal is not None
+        assert result.confidence == "validated-signal"
 
     def test_with_signal_no_targets(self):
         result = technical_result_to_schema(

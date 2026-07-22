@@ -1,9 +1,11 @@
 "use client";
 
+import { useState } from "react";
 import { InputSlider } from "./input-slider";
 import { cn } from "@/lib/utils";
 import type { PositionConfig, FundScale, RiskAppetite } from "@/types/position";
 import { RECOMMENDATIONS } from "@/lib/position/defaults";
+import { formatWuAsU, parseCapitalInput } from "@/lib/position/capital";
 
 interface PositionConfigPanelProps {
   config: PositionConfig | null;
@@ -16,6 +18,9 @@ export function PositionConfigPanel({
   onChange,
   className,
 }: PositionConfigPanelProps) {
+  const [capitalError, setCapitalError] = useState<string | null>(null);
+  const [capitalWarning, setCapitalWarning] = useState<string | null>(null);
+
   if (!config) return null;
 
   const isLargeCapital = config.totalCapitalWu > config.largeCapitalThresholdWu;
@@ -31,6 +36,28 @@ export function PositionConfigPanel({
     if (recommendation) {
       applyPatch(recommendation);
     }
+  };
+
+  const commitCapital = () => {
+    const input = document.getElementById("totalCapital") as HTMLInputElement | null;
+    /* istanbul ignore next -- defensive guard for detached input */
+    if (!input) return;
+
+    const result = parseCapitalInput(input.value);
+    if (!result.ok) {
+      setCapitalWarning(null);
+      if (result.reason === "empty") {
+        setCapitalError(null);
+      } else {
+        setCapitalError(result.reason);
+      }
+      input.value = formatWuAsU(config.totalCapitalWu);
+      return;
+    }
+
+    setCapitalError(null);
+    setCapitalWarning(result.warning ?? null);
+    applyPatch({ totalCapitalWu: result.wu });
   };
 
   return (
@@ -68,17 +95,27 @@ export function PositionConfigPanel({
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <div className="space-y-1.5">
             <label htmlFor="totalCapital" className="text-xs font-medium text-muted-foreground">
-              总资金（WU）
+              总资金（U）
             </label>
             <input
+              key={config.totalCapitalWu}
               id="totalCapital"
-              type="number"
-              min={0}
-              step={0.1}
-              value={config.totalCapitalWu}
-              onChange={(e) => applyPatch({ totalCapitalWu: Number(e.target.value) })}
+              type="text"
+              inputMode="decimal"
+              defaultValue={formatWuAsU(config.totalCapitalWu)}
+              onBlur={commitCapital}
+              onKeyDown={(e) => e.key === "Enter" && commitCapital()}
               className="input-surface"
             />
+            <p className="text-xs text-muted-foreground">
+              修改后将按当前配比重新分配各账户金额
+            </p>
+            {capitalError && (
+              <p className="text-xs text-danger">{capitalError}</p>
+            )}
+            {capitalWarning && (
+              <p className="text-xs text-warning">{capitalWarning}</p>
+            )}
           </div>
           <div className="space-y-1.5">
             <label htmlFor="cutPosition" className="text-xs font-medium text-muted-foreground">

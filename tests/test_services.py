@@ -164,9 +164,8 @@ class TestAnalysisOrchestrator:
         mock_fetch.return_value = MagicMock()
         mock_position = MagicMock()
         mock_position.strike = 100.0
-        mock_position.stop_loss = 95.0
-        mock_position.target = 110.0
-        mock_position.risk_reward = 2.0
+        mock_position.stop = 95.0
+        mock_position.targets = [110.0, 120.0]
 
         mock_detect.return_value = {
             "position": mock_position,
@@ -177,9 +176,11 @@ class TestAnalysisOrchestrator:
         result = orchestrator.analyze(valid_request)
         assert result.status == Status.COMPLETED
         assert result.technical_result.pattern_family == "XABCD"
-        # v4 unified contract: no signal was built (mock has no raw_assessment),
-        # so legacy entry/stop/target stay None instead of echoing the library.
-        assert result.technical_result.entry_price is None
+        # Without a validated signal the adapter surfaces the raw Position.
+        assert result.technical_result.entry_price == 100.0
+        assert result.technical_result.stop_loss == 95.0
+        assert result.technical_result.target_price == 110.0
+        assert result.technical_result.confidence == "raw-position"
 
     @patch("app.services.analysis.fetch_market_data")
     @patch("app.services.analysis.detect_patterns")
@@ -228,6 +229,53 @@ class TestAnalysisOrchestrator:
         assert result.status == Status.COMPLETED
         # Chart may be empty but analysis succeeds
         assert result.chart is not None
+
+    @patch("app.services.analysis.fetch_market_data")
+    @patch("app.services.analysis.detect_patterns")
+    def test_analyze_chart_success_and_distributed(
+        self, mock_detect, mock_fetch, orchestrator, valid_request
+    ):
+        """Single render success -> chart carries the distributed URL."""
+        from app.domain.schemas import ChartMeta
+        mock_fetch.return_value = MagicMock()
+        mock_detect.return_value = {
+            "position": MagicMock(),
+            "patterns": {"family": "XABCD"},
+            "divergences": {},
+            "plot": MagicMock(),
+        }
+        fake_meta = ChartMeta(format="png", width=600, height=300)
+        with patch("app.services.analysis.render_chart",
+                   return_value=(b"\x89PNG\x00" * 8, fake_meta)), \
+             patch("app.services.analysis.save_chart_locally",
+                   return_value="instance/charts/x.png"):
+            result = orchestrator.analyze(valid_request)
+        assert result.status == Status.COMPLETED
+        assert result.chart.width == 600
+        assert result.chart.url is not None
+        assert result.chart.url.startswith("/api/charts/")
+
+    @patch("app.services.analysis.fetch_market_data")
+    @patch("app.services.analysis.detect_patterns")
+    def test_analyze_chart_oversize_omitted(
+        self, mock_detect, mock_fetch, orchestrator, valid_request
+    ):
+        """Chart beyond the size cap is dropped but analysis succeeds."""
+        from app.domain.schemas import ChartMeta
+        mock_fetch.return_value = MagicMock()
+        mock_detect.return_value = {
+            "position": MagicMock(),
+            "patterns": {"family": "XABCD"},
+            "divergences": {},
+            "plot": MagicMock(),
+        }
+        fake_meta = ChartMeta(format="png", width=600, height=300)
+        with patch("app.services.analysis.render_chart",
+                   return_value=(b"\x89PNG\x00" * 8, fake_meta)), \
+             patch("app.services.analysis.validate_chart_size", return_value=False):
+            result = orchestrator.analyze(valid_request)
+        assert result.status == Status.COMPLETED
+        assert result.chart.url is None
 
     @patch("app.services.analysis.fetch_market_data")
     @patch("app.services.analysis.detect_patterns")

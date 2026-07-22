@@ -34,6 +34,7 @@ export function AppShell({ children }: AppShellProps) {
 function getPageTitle(pathname: string | null): string {
   if (pathname?.startsWith("/dashboard")) return "分析工作台";
   if (pathname?.startsWith("/position")) return "仓位管理";
+  if (pathname?.startsWith("/vibe")) return "AI 交易助手";
   if (pathname?.startsWith("/history")) return "历史记录";
   if (pathname?.startsWith("/settings")) return "账户设置";
   if (pathname?.startsWith("/admin")) return "管理员";

@@ -24,13 +24,14 @@ from app.api.errors import AppError
 from app.infra.pyharmonics_adapter import (
     fetch_market_data,
     detect_patterns,
-    generate_chart,
+    render_chart,
     technical_result_to_schema,
 )
 from app.domain.signals import resolve_analysis_type
 from app.services.signal_engine import build_signal, extract_candidates
 from app.infra.supabase_client import upload_chart, get_chart_url
-from app.services.chart import compress_chart, validate_chart_size
+from app.services.chart import validate_chart_size
+from app.services.chart_store import save_chart_locally
 from app.openai_handler import query_openai
 
 logger = logging.getLogger(__name__)
@@ -137,6 +138,32 @@ class AnalysisOrchestrator:
         except Exception:
             logger.exception("Signal engine failed, continuing without signal")
             return None
+
+    @staticmethod
+    def _distribute_chart(chart, analysis_id: str, image_bytes: bytes,
+                          user_id: Optional[str]):
+        """Attach a viewable URL to the chart: Supabase first, local fallback.
+
+        Distribution is best-effort: on any storage failure the chart falls
+        back to a locally served file so the dashboard always has a picture.
+        """
+        if user_id:
+            try:
+                storage_path = upload_chart(user_id, analysis_id, image_bytes)
+                if storage_path:
+                    chart.path = storage_path
+                    chart.url = get_chart_url(storage_path, expires_in=300)
+                    logger.info("Chart uploaded to Storage: %s", storage_path)
+                    return chart
+                logger.warning("Chart upload returned None, falling back to local")
+            except Exception as e:
+                logger.warning("Chart upload failed, falling back to local: %s", e)
+
+        local_path = save_chart_locally(analysis_id, image_bytes)
+        if local_path:
+            chart.path = local_path
+            chart.url = f"/api/charts/{analysis_id}.png"
+        return chart
 
     def analyze(self, request: AnalyzeRequest, user_id: Optional[str] = None, analysis_id: Optional[str] = None) -> AnalysisData:
         """Run full analysis pipeline.
@@ -246,40 +273,16 @@ class AnalysisOrchestrator:
             else:
                 raise
 
-        # Step 6: Chart
+        # Step 6: Chart (single render, then distribute via Supabase or local)
         chart = ChartMeta()
         try:
-            chart = generate_chart(
-                detection_result,
-                dpi=150,
-                max_width=1200,
-                max_height=800,
-            )
-            # Attempt to compress if plot has to_image
-            plot = detection_result.get("plot") or detection_result.get("plot_fallback")
-            if plot and hasattr(plot, "to_image"):
-                raw_bytes = plot.to_image(dpi=150)
-                if raw_bytes:
-                    compressed, chart_meta = compress_chart(raw_bytes)
-                    if validate_chart_size(compressed):
-                        chart = chart_meta
-                        # Upload to Supabase Storage if user_id provided
-                        if user_id and analysis_id:
-                            try:
-                                storage_path = upload_chart(user_id, analysis_id, compressed)
-                                if storage_path:
-                                    signed_url = get_chart_url(storage_path, expires_in=300)
-                                    chart.path = storage_path
-                                    chart.url = signed_url
-                                    logger.info("Chart uploaded to Storage: %s", storage_path)
-                                else:
-                                    logger.warning("Chart upload returned None, using local data")
-                            except Exception as e:
-                                logger.warning("Chart upload failed: %s", e)
-                                # Continue without URL - chart data still in response
-                    else:
-                        logger.warning("Chart exceeds size limit, omitting")
-                        chart = ChartMeta(format="png", path=None, url=None)
+            image_bytes, chart_meta = render_chart(detection_result, dpi=150)
+            if validate_chart_size(image_bytes):
+                chart = chart_meta
+                chart = self._distribute_chart(chart, analysis_id, image_bytes, user_id)
+            else:
+                logger.warning("Chart exceeds size limit, omitting")
+                chart = ChartMeta(format="png", path=None, url=None)
         except AppError as e:
             if e.code == ErrorCode.CHART_ERROR:
                 logger.warning("Chart generation failed, continuing without chart")

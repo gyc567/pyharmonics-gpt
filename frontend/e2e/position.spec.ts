@@ -15,11 +15,20 @@ test.describe("仓位管理 (已登录)", () => {
 
   test("修改总资金后指标卡应联动更新", async ({ page }) => {
     const input = page.locator("#totalCapital");
-    await input.fill("20");
-    await input.blur();
+    await input.fill("200000");
+    await input.press("Tab");
 
-    // 20 WU -> 20 × 10,000 = 200,000 U
+    // 200,000 U -> 20 WU
     await expect(page.getByText("200,000 U").first()).toBeVisible();
+  });
+
+  test("输入资金后账户结构应联动更新", async ({ page }) => {
+    const input = page.locator("#totalCapital");
+    await input.fill("50000");
+    await input.press("Tab");
+
+    // 50,000 U -> 5 WU; emergency 30% = 15,000 U
+    await expect(page.getByText("15,000 U").first()).toBeVisible();
   });
 
   test("预设方案按钮应可点击", async ({ page }) => {
